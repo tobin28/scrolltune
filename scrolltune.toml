@@ -1,0 +1,8 @@
+# Scroll wheel filter configuration
+
+# Device name to match (case-insensitive substring)
+device = ""
+
+# Hi-res tick threshold per scroll notch (120 = one physical detent)
+# Higher values = less sensitive, lower = more sensitive
+threshold = 120
