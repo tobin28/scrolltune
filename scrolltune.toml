@@ -2,9 +2,11 @@
 
 # Device name to match (case-insensitive substring)
 # Must refer to a mouse that exposes REL_WHEEL_HI_RES
+# Leave empty for auto-detection
 device = ""
 
 # Hi-res tick threshold per scroll notch (120 = one physical detent)
 # Higher values = less sensitive, lower = more sensitive
+# Try 60 for smoother, slightly more responsive scrolling
 # Must be a positive integer
 threshold = 120

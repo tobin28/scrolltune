@@ -4,7 +4,7 @@ A lightweight evdev filter that tames high-resolution scroll wheels on Linux.
 
 ## Problem
 
-Mice with high-resolution scroll wheels (Logitech MX Master, MX Anywhere, etc.) feel jittery on Linux. Every tiny hi-res scroll tick is passed straight through to applications, causing overly sensitive, twitchy scrolling. On Windows and macOS, scrolling typically feels closer to the wheel's physical detents because small ticks are accumulated before a full line-scroll step is emitted.
+Mice with high-resolution scroll wheels (Logitech MX Master, MX Anywhere, etc.) feel jittery on Linux. Every hi-res scroll tick is passed straight through to applications, causing overly sensitive, twitchy scrolling. On Windows and macOS, scrolling typically feels closer to the wheel's physical detents because small ticks are accumulated before a full line-scroll step is emitted.
 
 Linux has no built-in mechanism for this — libinput forwards all hi-res events directly, leaving applications to deal with them individually. Most Linux applications don't implement accumulation, resulting in noticeably worse scroll behavior compared to the same mouse on Windows or macOS.
 
@@ -54,12 +54,13 @@ Settings are read from `/etc/scrolltune.toml` (or `scrolltune.toml` in the worki
 
 ```toml
 # Device name to match (case-insensitive substring)
-# Must refer to a mouse with REL_WHEEL_HI_RES
+# Must refer to a mouse that exposes REL_WHEEL_HI_RES
 # Leave empty for auto-detection
 device = ""
 
 # Hi-res tick threshold per scroll notch (120 = one physical detent)
 # Higher values = less sensitive, lower = more sensitive
+# Try 60 for smoother, slightly more responsive scrolling
 # Must be a positive integer
 threshold = 120
 ```
@@ -68,21 +69,21 @@ In most cases you can leave `device` empty — auto-detection will find the righ
 
 ## Installation
 
-Run the deploy script to build, install the binary to `/usr/local/bin`, install the systemd service, seed `/etc/scrolltune.toml` if it does not already exist, and start it:
+Run the install script to build, install the binary to `/usr/local/bin`, install the systemd service, seed `/etc/scrolltune.toml` if it does not already exist, and start it:
 
 ```
-./deploy.sh
+./install.sh
 ```
 
 To intentionally replace the existing config with the repo default:
 
 ```
-./deploy.sh --overwrite-config
+./install.sh --overwrite-config
 ```
 
 The service runs as root (required for evdev grab and uinput access) and starts automatically on boot.
 
-The deploy script also installs a udev rule that restarts the service when a mouse-like USB input device is plugged in or removed, so the filter recovers automatically when the device topology changes. The service also remembers the last device it successfully grabbed and uses that to disambiguate future restarts when possible.
+The install script also installs a udev rule that restarts the service when a mouse-like USB input device is plugged in or removed, so the filter recovers automatically when the device topology changes. The service also remembers the last device it successfully grabbed and uses that to disambiguate future restarts when possible.
 
 ## Manual usage
 
