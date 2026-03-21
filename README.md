@@ -21,7 +21,7 @@ All other events (mouse movement, clicks, horizontal scroll) pass through with z
 
 The filter creates a virtual input device via uinput that applications see instead of the original.
 
-It uses standard Linux kernel interfaces (evdev and uinput) and works on any distribution — there are no distro-specific or desktop-specific dependencies.
+It uses standard Linux kernel interfaces (evdev and uinput) and should work on any modern Linux distribution with evdev and uinput support — there are no distro-specific or desktop-specific dependencies.
 
 `scrolltune` only supports mice that expose `REL_WHEEL_HI_RES`. If the selected device does not provide hi-res wheel events, the program exits with a clear error instead of grabbing it.
 
@@ -92,7 +92,7 @@ To intentionally replace the existing config with the repo default:
 
 This installs the persistent systemd-based setup. The service runs as root (required for evdev grab and uinput access) and starts automatically on boot.
 
-The install script also installs a udev rule that restarts the service when a mouse-like USB input device is plugged in or removed, so the filter recovers automatically when the device topology changes. The service also remembers the last device it successfully grabbed and uses that to disambiguate future restarts when possible.
+The install script also installs a udev rule that restarts the service when a mouse-like USB input device is plugged in or removed, so the filter recovers automatically when the device topology changes. The service also remembers the last device it successfully grabbed. When possible, it uses that to disambiguate future restarts.
 
 ## Managing the service
 
