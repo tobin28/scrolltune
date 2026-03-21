@@ -3,6 +3,19 @@ set -euo pipefail
 
 # Build, install, and restart the scrolltune service
 
+overwrite_config=false
+for arg in "$@"; do
+    case "$arg" in
+        --overwrite-config)
+            overwrite_config=true
+            ;;
+        *)
+            echo "Usage: $0 [--overwrite-config]" >&2
+            exit 1
+            ;;
+    esac
+done
+
 cd "$(dirname "$0")"
 
 echo "Building..."
@@ -15,7 +28,15 @@ echo "Installing binary..."
 sudo cp target/release/scrolltune /usr/local/bin/scrolltune
 
 echo "Installing config..."
-sudo cp scrolltune.toml /etc/scrolltune.toml
+if [[ "$overwrite_config" == true ]]; then
+    sudo cp scrolltune.toml /etc/scrolltune.toml
+    echo "Overwriting config at /etc/scrolltune.toml"
+elif [[ -e /etc/scrolltune.toml ]]; then
+    echo "Preserving existing config at /etc/scrolltune.toml"
+else
+    sudo cp scrolltune.toml /etc/scrolltune.toml
+    echo "Installing default config at /etc/scrolltune.toml"
+fi
 
 echo "Installing service..."
 sudo cp -u scrolltune.service /etc/systemd/system/scrolltune.service

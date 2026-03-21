@@ -5,7 +5,9 @@ After=multi-user.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/scrolltune
+StateDirectory=scrolltune
 Restart=on-failure
+RestartPreventExitStatus=2
 RestartSec=3
 
 [Install]

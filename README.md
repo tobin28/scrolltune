@@ -4,7 +4,7 @@ A lightweight evdev filter that tames high-resolution scroll wheels on Linux.
 
 ## Problem
 
-Mice with high-resolution scroll wheels (Logitech MX Master, MX Anywhere, etc.) feel jittery on Linux. Every tiny hi-res scroll tick is passed straight through to applications, causing overly sensitive, twitchy scrolling. On Windows, applications accumulate these small ticks and only scroll once a full notch threshold is reached, matching the tactile feedback of the wheel.
+Mice with high-resolution scroll wheels (Logitech MX Master, MX Anywhere, etc.) feel jittery on Linux. Every tiny hi-res scroll tick is passed straight through to applications, causing overly sensitive, twitchy scrolling. On Windows and macOS, scrolling typically feels closer to the wheel's physical detents because small ticks are accumulated before a full line-scroll step is emitted.
 
 Linux has no built-in mechanism for this — libinput forwards all hi-res events directly, leaving applications to deal with them individually. Most Linux applications don't implement accumulation, resulting in noticeably worse scroll behavior compared to the same mouse on Windows or macOS.
 
@@ -23,14 +23,17 @@ The filter creates a virtual input device via uinput that applications see inste
 
 It uses standard Linux kernel interfaces (evdev and uinput) and works on any distribution — there are no distro-specific or desktop-specific dependencies.
 
+`scrolltune` only supports mice that expose `REL_WHEEL_HI_RES`. If the selected device does not provide hi-res wheel events, the program exits with a clear error instead of grabbing it.
+
 ## Device detection
 
 The filter uses a priority chain to find the mouse:
 
 1. **Explicit name** — if `device` is set in the config, it matches by name (case-insensitive substring)
-2. **Single mouse** — if only one mouse-like device is found, it is used automatically
-3. **Known vendor** — if multiple mice are found, it filters by known mouse vendor IDs (currently Logitech). If exactly one matches, it is used
-4. **Manual fallback** — if none of the above work, all candidates are printed so you can set `device` in the config
+2. **Single supported mouse** — if only one mouse with `REL_WHEEL_HI_RES` is found, it is used automatically
+3. **Last known device** — if multiple supported mice are found, it prefers the last device that was successfully attached and grabbed
+4. **Known vendor** — if that still does not disambiguate, it filters by known mouse vendor IDs (currently Logitech). If exactly one matches, it is used
+5. **Manual fallback** — if none of the above work, all supported candidates are printed so you can set `device` in the config
 
 Virtual input devices (uinput, ydotool, etc.) are excluded automatically.
 
@@ -51,27 +54,35 @@ Settings are read from `/etc/scrolltune.toml` (or `scrolltune.toml` in the worki
 
 ```toml
 # Device name to match (case-insensitive substring)
+# Must refer to a mouse with REL_WHEEL_HI_RES
 # Leave empty for auto-detection
 device = ""
 
 # Hi-res tick threshold per scroll notch (120 = one physical detent)
 # Higher values = less sensitive, lower = more sensitive
+# Must be a positive integer
 threshold = 120
 ```
 
-In most cases you can leave `device` empty — auto-detection will find the right mouse. Set it only if auto-detection picks the wrong device or can't decide.
+In most cases you can leave `device` empty — auto-detection will find the right supported mouse. Set it only if auto-detection picks the wrong device or can't decide.
 
 ## Installation
 
-Run the deploy script to build, install the binary to `/usr/local/bin`, install the config and systemd service, and start it:
+Run the deploy script to build, install the binary to `/usr/local/bin`, install the systemd service, seed `/etc/scrolltune.toml` if it does not already exist, and start it:
 
 ```
 ./deploy.sh
 ```
 
+To intentionally replace the existing config with the repo default:
+
+```
+./deploy.sh --overwrite-config
+```
+
 The service runs as root (required for evdev grab and uinput access) and starts automatically on boot.
 
-The deploy script also installs a udev rule that restarts the service when a USB HID device is plugged in, so the filter recovers automatically if the mouse is unplugged and reconnected.
+The deploy script also installs a udev rule that restarts the service when a mouse-like USB input device is plugged in or removed, so the filter recovers automatically when the device topology changes. The service also remembers the last device it successfully grabbed and uses that to disambiguate future restarts when possible.
 
 ## Manual usage
 
