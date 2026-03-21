@@ -1,11 +1,21 @@
+mod config;
+mod devices;
+
+use crate::config::{
+    config_path_for_update, load_config, load_config_quiet, update_device_setting,
+    update_threshold_setting,
+};
+use crate::devices::{
+    find_device, list_mouse_like_devices, load_last_device, save_last_device, DeviceFingerprint,
+    MouseDeviceInfo,
+};
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AbsInfo, AbsoluteAxisType, Device, EventType, InputEvent, RelativeAxisType};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::{fs, process};
+use std::env;
+use std::io::{self, Write};
+use std::path::Path;
+use std::process::{self, Command as ProcessCommand};
 
-const CONFIG_PATHS: &[&str] = &["/etc/scrolltune.toml", "scrolltune.toml"];
-const LAST_DEVICE_PATH: &str = "/var/lib/scrolltune/last-device.toml";
 const NO_TARGET_EXIT_CODE: i32 = 2;
 
 /// scrolltune — scroll wheel filter for mice on Linux.
@@ -13,310 +23,6 @@ const NO_TARGET_EXIT_CODE: i32 = 2;
 /// Grabs the mouse's evdev device, accumulates hi-res scroll ticks,
 /// and only emits scroll events when a full notch threshold is reached,
 /// preventing jittery scrolling from high-resolution scroll wheels.
-
-#[derive(Deserialize)]
-struct Config {
-    #[serde(default = "default_device")]
-    device: String,
-    #[serde(default = "default_threshold")]
-    threshold: i32,
-}
-
-fn default_device() -> String {
-    String::new()
-}
-fn default_threshold() -> i32 {
-    120
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            device: default_device(),
-            threshold: default_threshold(),
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize)]
-struct DeviceFingerprint {
-    name: String,
-    bus_type: u16,
-    vendor: u16,
-    product: u16,
-    version: u16,
-    physical_path: Option<String>,
-    unique_name: Option<String>,
-}
-
-type EnumeratedDevice = (PathBuf, Device);
-
-impl DeviceFingerprint {
-    fn from_device(dev: &Device) -> Self {
-        let input_id = dev.input_id();
-        Self {
-            name: dev.name().unwrap_or("unknown").to_string(),
-            bus_type: input_id.bus_type().0,
-            vendor: input_id.vendor(),
-            product: input_id.product(),
-            version: input_id.version(),
-            physical_path: dev.physical_path().map(ToOwned::to_owned),
-            unique_name: dev.unique_name().map(ToOwned::to_owned),
-        }
-    }
-
-    fn matches_name_and_id(&self, dev: &Device) -> bool {
-        let input_id = dev.input_id();
-        self.name == dev.name().unwrap_or("unknown")
-            && self.bus_type == input_id.bus_type().0
-            && self.vendor == input_id.vendor()
-            && self.product == input_id.product()
-            && self.version == input_id.version()
-    }
-}
-
-fn load_config() -> Config {
-    for path in CONFIG_PATHS {
-        if Path::new(path).exists() {
-            match fs::read_to_string(path) {
-                Ok(contents) => match toml::from_str(&contents) {
-                    Ok(config) => {
-                        eprintln!("Config loaded from: {path}");
-                        return config;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to parse {path}: {e}");
-                        process::exit(1);
-                    }
-                },
-                Err(e) => eprintln!("Failed to read {path}: {e}"),
-            }
-        }
-    }
-    eprintln!("No config file found, using defaults");
-    Config::default()
-}
-
-fn load_last_device() -> Option<DeviceFingerprint> {
-    let path = Path::new(LAST_DEVICE_PATH);
-    if !path.exists() {
-        return None;
-    }
-
-    match fs::read_to_string(path) {
-        Ok(contents) => match toml::from_str(&contents) {
-            Ok(fingerprint) => Some(fingerprint),
-            Err(e) => {
-                eprintln!("Failed to parse {LAST_DEVICE_PATH}: {e}");
-                None
-            }
-        },
-        Err(e) => {
-            eprintln!("Failed to read {LAST_DEVICE_PATH}: {e}");
-            None
-        }
-    }
-}
-
-fn save_last_device(fingerprint: &DeviceFingerprint) {
-    let path = Path::new(LAST_DEVICE_PATH);
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            eprintln!("Failed to create {}: {e}", parent.display());
-            return;
-        }
-    }
-
-    match toml::to_string_pretty(fingerprint) {
-        Ok(contents) => {
-            if let Err(e) = fs::write(path, contents) {
-                eprintln!("Failed to write {LAST_DEVICE_PATH}: {e}");
-            }
-        }
-        Err(e) => eprintln!("Failed to serialize last device state: {e}"),
-    }
-}
-
-fn is_mouse(dev: &Device) -> bool {
-    // Exclude virtual devices (uinput, ydotool, etc.)
-    if dev.input_id().bus_type() == evdev::BusType::BUS_VIRTUAL {
-        return false;
-    }
-    dev.supported_events().contains(EventType::RELATIVE)
-        && dev
-            .supported_relative_axes()
-            .map(|axes| {
-                axes.contains(RelativeAxisType::REL_X)
-                    && axes.contains(RelativeAxisType::REL_Y)
-                    && axes.contains(RelativeAxisType::REL_WHEEL)
-            })
-            .unwrap_or(false)
-}
-
-fn supports_hi_res_scroll(dev: &Device) -> bool {
-    dev.supported_relative_axes()
-        .map(|axes| axes.contains(RelativeAxisType::REL_WHEEL_HI_RES))
-        .unwrap_or(false)
-}
-
-/// Known mouse vendor IDs for auto-detection when multiple mice are found.
-const KNOWN_MOUSE_VENDORS: &[(u16, &str)] = &[(0x046d, "Logitech")];
-
-fn is_known_mouse_vendor(dev: &Device) -> bool {
-    let vendor = dev.input_id().vendor();
-    KNOWN_MOUSE_VENDORS.iter().any(|(id, _)| *id == vendor)
-}
-
-fn take_device_by_path(mice: Vec<EnumeratedDevice>, path: &Path) -> Device {
-    mice.into_iter()
-        .find(|(p, _)| p == path)
-        .map(|(_, dev)| dev)
-        .unwrap()
-}
-
-fn find_last_known_device(
-    supported: &[&EnumeratedDevice],
-    fingerprint: &DeviceFingerprint,
-) -> Option<PathBuf> {
-    let base_matches: Vec<_> = supported
-        .iter()
-        .copied()
-        .filter(|(_, dev)| fingerprint.matches_name_and_id(dev))
-        .collect();
-
-    if base_matches.len() == 1 {
-        return Some(base_matches[0].0.clone());
-    }
-
-    if let Some(unique_name) = fingerprint.unique_name.as_deref() {
-        let unique_matches: Vec<_> = base_matches
-            .iter()
-            .copied()
-            .filter(|(_, dev)| dev.unique_name() == Some(unique_name))
-            .collect();
-        if unique_matches.len() == 1 {
-            return Some(unique_matches[0].0.clone());
-        }
-    }
-
-    if let Some(physical_path) = fingerprint.physical_path.as_deref() {
-        let physical_matches: Vec<_> = base_matches
-            .iter()
-            .copied()
-            .filter(|(_, dev)| dev.physical_path() == Some(physical_path))
-            .collect();
-        if physical_matches.len() == 1 {
-            return Some(physical_matches[0].0.clone());
-        }
-    }
-
-    None
-}
-
-fn find_device(name_filter: &str) -> Result<Device, String> {
-    let mice: Vec<_> = evdev::enumerate()
-        .filter(|(_, dev)| is_mouse(dev))
-        .collect();
-
-    if mice.is_empty() {
-        return Err("No mouse devices found".to_string());
-    }
-
-    // Priority 1: explicit name filter from config
-    if !name_filter.is_empty() {
-        let path = mice
-            .iter()
-            .find(|(_, dev)| {
-                dev.name()
-                    .map(|n| n.to_lowercase().contains(&name_filter.to_lowercase()))
-                    .unwrap_or(false)
-            })
-            .map(|(path, _)| path.clone())
-            .ok_or_else(|| format!("No mouse found matching '{name_filter}'"))?;
-
-        let dev = take_device_by_path(mice, &path);
-        if supports_hi_res_scroll(&dev) {
-            return Ok(dev);
-        }
-
-        return Err(format!(
-            "Device '{}' does not support REL_WHEEL_HI_RES",
-            dev.name().unwrap_or("unknown")
-        ));
-    }
-
-    let supported: Vec<_> = mice
-        .iter()
-        .filter(|(_, dev)| supports_hi_res_scroll(dev))
-        .collect();
-
-    if supported.is_empty() {
-        eprintln!("No mice with REL_WHEEL_HI_RES support found");
-        eprintln!("Mouse candidates:");
-        for (_, dev) in &mice {
-            eprintln!("  - {}", dev.name().unwrap_or("unknown"));
-        }
-        return Err("scrolltune only supports mice that expose REL_WHEEL_HI_RES".to_string());
-    }
-
-    // Priority 2: only one mouse detected
-    if supported.len() == 1 {
-        let path = supported[0].0.clone();
-        let dev = take_device_by_path(mice, &path);
-        eprintln!("Auto-detected: {}", dev.name().unwrap_or("unknown"));
-        return Ok(dev);
-    }
-
-    // Priority 3: prefer the last known working device when multiple are present
-    if let Some(fingerprint) = load_last_device() {
-        if let Some(path) = find_last_known_device(&supported, &fingerprint) {
-            let dev = take_device_by_path(mice, &path);
-            eprintln!(
-                "Auto-detected from last known device: {}",
-                dev.name().unwrap_or("unknown")
-            );
-            return Ok(dev);
-        }
-    }
-
-    // Priority 4: filter by known mouse vendors
-    let known: Vec<_> = supported
-        .iter()
-        .filter(|(_, dev)| is_known_mouse_vendor(dev))
-        .collect();
-
-    if known.len() == 1 {
-        let (path, _) = known[0];
-        let path = path.clone();
-        let dev = take_device_by_path(mice, &path);
-        let vendor = dev.input_id().vendor();
-        let vendor_name = KNOWN_MOUSE_VENDORS
-            .iter()
-            .find(|(id, _)| *id == vendor)
-            .map(|(_, name)| *name)
-            .unwrap_or("unknown");
-        eprintln!(
-            "Auto-detected by vendor ({}): {}",
-            vendor_name,
-            dev.name().unwrap_or("unknown")
-        );
-        return Ok(dev);
-    }
-
-    // Give up — print candidates to help the user configure
-    eprintln!("Multiple supported mice found — set 'device' in config:");
-    for (_, dev) in &supported {
-        let vendor = dev.input_id().vendor();
-        let product = dev.input_id().product();
-        eprintln!(
-            "  - {} (vendor: {:04x}, product: {:04x})",
-            dev.name().unwrap_or("unknown"),
-            vendor,
-            product
-        );
-    }
-    Err("Multiple supported mice found".to_string())
-}
 
 fn build_virtual_device(source: &Device) -> VirtualDevice {
     let name = format!("{} (scrolltune)", source.name().unwrap_or("mouse"));
@@ -368,6 +74,15 @@ fn build_virtual_device(source: &Device) -> VirtualDevice {
     builder.build().expect("Failed to build virtual device")
 }
 
+enum Command {
+    Run,
+    Help,
+    Status,
+    ListDevices,
+    SetDevice,
+    SetThreshold(Option<String>),
+}
+
 struct ScrollAccumulator {
     accumulator: i32,
     threshold: i32,
@@ -400,7 +115,59 @@ impl ScrollAccumulator {
 }
 
 fn main() {
-    let config = load_config();
+    match parse_command() {
+        Ok(Command::Help) => {
+            print_help();
+            return;
+        }
+        Ok(Command::Status) => {
+            print_status();
+            return;
+        }
+        Ok(Command::ListDevices) => {
+            let devices = list_mouse_like_devices();
+            if devices.is_empty() {
+                eprintln!("No mouse-like devices found");
+                process::exit(NO_TARGET_EXIT_CODE);
+            }
+            print_device_details(&devices);
+            return;
+        }
+        Ok(Command::SetDevice) => {
+            let devices = list_mouse_like_devices();
+            if devices.is_empty() {
+                eprintln!("No mouse-like devices found");
+                process::exit(NO_TARGET_EXIT_CODE);
+            }
+            if let Err(e) = run_set_device(&devices) {
+                eprintln!("{e}");
+                process::exit(1);
+            }
+            return;
+        }
+        Ok(Command::SetThreshold(value)) => {
+            if let Err(e) = run_set_threshold(value) {
+                eprintln!("{e}");
+                process::exit(1);
+            }
+            return;
+        }
+        Ok(Command::Run) => {}
+        Err(e) => {
+            eprintln!("{e}");
+            eprintln!();
+            print_help();
+            process::exit(1);
+        }
+    }
+
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
 
     if config.threshold <= 0 {
         eprintln!(
@@ -489,5 +256,391 @@ fn main() {
                 process::exit(1);
             }
         }
+    }
+}
+
+fn parse_command() -> Result<Command, String> {
+    let args: Vec<_> = env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => Ok(Command::Run),
+        [flag] if flag == "--help" || flag == "-h" => Ok(Command::Help),
+        [flag] if flag == "--status" || flag == "-s" => Ok(Command::Status),
+        [flag] if flag == "--list-devices" || flag == "-l" => Ok(Command::ListDevices),
+        [flag] if flag == "--set-device" || flag == "-d" => Ok(Command::SetDevice),
+        [flag] if flag == "--set-threshold" || flag == "-t" => Ok(Command::SetThreshold(None)),
+        [flag, value] if flag == "--set-threshold" || flag == "-t" => {
+            Ok(Command::SetThreshold(Some(value.clone())))
+        }
+        _ => Err("Unknown arguments".to_string()),
+    }
+}
+
+fn print_help() {
+    println!("scrolltune");
+    println!("Scroll wheel filter for hi-res mouse wheels on Linux.\n");
+    println!("Usage:");
+    println!("  scrolltune");
+    println!("  scrolltune --help | -h");
+    println!("  scrolltune --status | -s");
+    println!("  scrolltune --list-devices | -l");
+    println!("  scrolltune --set-device | -d");
+    println!("  scrolltune --set-threshold | -t [VALUE]");
+    println!();
+    println!("Commands:");
+    println!("  --help, -h");
+    println!("      Show this help text.");
+    println!("  --status, -s");
+    println!("      Show service state, last attached device, and configured threshold.");
+    println!("  --list-devices, -l");
+    println!("      List all mouse-like evdev devices with diagnostic details.");
+    println!("  --set-device, -d");
+    println!("      Interactively choose a selectable mouse device and update the config.");
+    println!("  --set-threshold, -t [VALUE]");
+    println!("      Set the hi-res scroll threshold interactively or directly.");
+    println!();
+    println!("Examples:");
+    println!("  scrolltune -s");
+    println!("  scrolltune -l");
+    println!("  scrolltune -d");
+    println!("  scrolltune -t");
+    println!("  scrolltune -t 60");
+    println!();
+    println!("Note:");
+    println!("  Use sudo for commands that update /etc/scrolltune.toml or restart");
+    println!("  scrolltune.service. Listing devices does not require sudo.");
+}
+
+fn print_status() {
+    println!("service: {}", service_state_label());
+
+    match load_last_device() {
+        Some(fingerprint) => println!("last attached device: {}", fingerprint.name()),
+        None => println!("last attached device: (none)"),
+    }
+
+    match load_config_quiet() {
+        Ok(config) => {
+            if config.device.trim().is_empty() {
+                println!("configured device filter: (auto)");
+            } else {
+                println!("configured device filter: {}", config.device);
+            }
+            println!("configured threshold: {}", config.threshold);
+        }
+        Err(e) => {
+            println!("configured device filter: (error)");
+            println!("configured threshold: (error)");
+            println!("config error: {e}");
+        }
+    }
+}
+
+fn service_state_label() -> String {
+    let output = match ProcessCommand::new("systemctl")
+        .args(["is-active", "scrolltune.service"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => return format!("unknown ({e})"),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    if !stderr.is_empty() {
+        return format!("unknown ({stderr})");
+    }
+
+    format!("unknown (exit status {})", output.status)
+}
+
+fn print_device_details(devices: &[MouseDeviceInfo]) {
+    for device in devices {
+        println!("{}", device.path.display());
+        println!("  name: {}", device.name);
+        println!("  bus: {:04x}", device.bus_type);
+        println!("  vendor: {:04x}", device.vendor);
+        println!("  product: {:04x}", device.product);
+        println!("  version: {:04x}", device.version);
+        println!(
+            "  physical path: {}",
+            device.physical_path.as_deref().unwrap_or("")
+        );
+        println!(
+            "  unique name: {}",
+            device.unique_name.as_deref().unwrap_or("")
+        );
+        println!("  virtual: {}", yes_no(device.is_virtual));
+        println!("  hi-res wheel: {}", yes_no(device.has_hi_res_wheel));
+        println!(
+            "  candidate: {}",
+            yes_no(device.candidate_status.is_selectable())
+        );
+        if let Some(reason) = device.candidate_reason() {
+            println!("  reason: {reason}");
+        }
+        println!();
+    }
+}
+
+fn run_set_device(devices: &[MouseDeviceInfo]) -> Result<(), String> {
+    let selectable_devices: Vec<_> = devices
+        .iter()
+        .filter(|device| device.candidate_status.is_selectable())
+        .collect();
+
+    if selectable_devices.is_empty() {
+        return Err("No selectable mouse devices found".to_string());
+    }
+
+    let current_selection = load_last_device();
+    print_device_picker(&selectable_devices, current_selection.as_ref());
+    print!("Select device by number or exact name.\nPress Enter to cancel.\n> ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("Failed to flush stdout: {e}"))?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("Failed to read selection: {e}"))?;
+    let selection = input.trim();
+
+    if selection.is_empty() || matches!(selection, "q" | "quit") {
+        println!("No changes made.");
+        return Ok(());
+    }
+
+    let selected = if let Ok(index) = selection.parse::<usize>() {
+        if index == 0 || index > selectable_devices.len() {
+            return Err(format!("Invalid selection '{selection}'"));
+        }
+        selectable_devices[index - 1]
+    } else {
+        let matches: Vec<_> = selectable_devices
+            .iter()
+            .copied()
+            .filter(|device| device.name == selection || display_device_name(&device.name) == selection)
+            .collect();
+        match matches.len() {
+            0 => return Err(format!("No device found with exact name '{selection}'")),
+            1 => matches[0],
+            _ => {
+                return Err(format!(
+                    "Multiple devices match '{selection}'. Select by number instead."
+                ));
+            }
+        }
+    };
+
+    let path = config_path_for_update();
+    update_device_setting(&path, &selected.name)?;
+    println!("Updated {}", path.display());
+    println!(
+        "device = {}",
+        toml::Value::String(selected.name.clone())
+    );
+
+    match restart_service_if_needed(&path) {
+        Ok(Some(message)) => println!("{message}"),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    Ok(())
+}
+
+fn run_set_threshold(value: Option<String>) -> Result<(), String> {
+    let threshold = match value {
+        Some(value) => parse_threshold(&value)?,
+        None => {
+            let config = load_config()?;
+            match prompt_for_threshold(config.threshold)? {
+                Some(threshold) => threshold,
+                None => {
+                    println!("No changes made.");
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let path = config_path_for_update();
+    update_threshold_setting(&path, threshold)?;
+    println!("Updated {}", path.display());
+    println!("threshold = {threshold}");
+
+    match restart_service_if_needed(&path) {
+        Ok(Some(message)) => println!("{message}"),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    Ok(())
+}
+
+fn print_device_picker(devices: &[&MouseDeviceInfo], current_selection: Option<&DeviceFingerprint>) {
+    println!("\nMouse-like devices\n");
+
+    let marker_width = 1;
+    let index_width = devices.len().to_string().len().max(1);
+    let name_width = devices
+        .iter()
+        .map(|device| display_device_name(&device.name).len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let event_width = devices
+        .iter()
+        .map(|device| device.path.display().to_string().len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    let status_width = devices
+        .iter()
+        .map(|device| device.candidate_status.label().len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+
+    let border = format!(
+        "+-{:-<marker_width$}-+-{:-<index_width$}-+-{:-<name_width$}-+-{:-<event_width$}-+-{:-<status_width$}-+",
+        "",
+        "",
+        "",
+        "",
+        "",
+        marker_width = marker_width,
+        index_width = index_width,
+        name_width = name_width,
+        event_width = event_width,
+        status_width = status_width,
+    );
+    println!("{border}");
+    println!(
+        "| {:<marker_width$} | {:<index_width$} | {:<name_width$} | {:<event_width$} | {:<status_width$} |",
+        "*",
+        "#",
+        "Name",
+        "Event",
+        "Status",
+        marker_width = marker_width,
+        index_width = index_width,
+        name_width = name_width,
+        event_width = event_width,
+        status_width = status_width,
+    );
+    println!("{border}");
+
+    for (index, device) in devices.iter().enumerate() {
+        let marker = if current_selection
+            .map(|fingerprint| fingerprint.matches_info(device))
+            .unwrap_or(false)
+        {
+            "*"
+        } else {
+            " "
+        };
+        println!(
+            "| {:<marker_width$} | {:>index_width$} | {:<name_width$} | {:<event_width$} | {:<status_width$} |",
+            marker,
+            index + 1,
+            display_device_name(&device.name),
+            device.path.display(),
+            device.candidate_status.label(),
+            marker_width = marker_width,
+            index_width = index_width,
+            name_width = name_width,
+            event_width = event_width,
+            status_width = status_width,
+        );
+    }
+
+    println!("{border}");
+    if let Some(current_selection) = current_selection {
+        if devices
+            .iter()
+            .any(|device| current_selection.matches_info(device))
+        {
+            println!("* current running service device");
+        } else {
+            println!(
+                "Current running service device: {} (not shown in selectable list)",
+                current_selection.name()
+            );
+        }
+    }
+    println!();
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn display_device_name(name: &str) -> &str {
+    let trimmed = name.trim();
+    if trimmed.is_empty() { name } else { trimmed }
+}
+
+fn prompt_for_threshold(current_threshold: i32) -> Result<Option<i32>, String> {
+    println!("\nCurrent threshold: {current_threshold}\n");
+    print!("Enter new threshold (positive integer).\nPress Enter to cancel.\n> ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("Failed to flush stdout: {e}"))?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("Failed to read threshold: {e}"))?;
+    let selection = input.trim();
+
+    if selection.is_empty() || matches!(selection, "q" | "quit") {
+        return Ok(None);
+    }
+
+    parse_threshold(selection).map(Some)
+}
+
+fn parse_threshold(value: &str) -> Result<i32, String> {
+    let threshold = value
+        .parse::<i32>()
+        .map_err(|_| format!("Invalid threshold '{value}': must be a positive integer"))?;
+    if threshold <= 0 {
+        return Err(format!(
+            "Invalid threshold '{value}': must be a positive integer"
+        ));
+    }
+    Ok(threshold)
+}
+
+fn restart_service_if_needed(config_path: &Path) -> Result<Option<String>, String> {
+    if config_path != Path::new("/etc/scrolltune.toml") {
+        return Ok(Some(
+            "Updated local config only; systemd service restart skipped.".to_string(),
+        ));
+    }
+
+    let output = ProcessCommand::new("systemctl")
+        .args(["restart", "scrolltune.service"])
+        .output()
+        .map_err(|e| format!("Updated config, but failed to restart scrolltune.service: {e}"))?;
+
+    if output.status.success() {
+        Ok(Some("Restarted scrolltune.service".to_string()))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("exit status {}", output.status)
+        } else {
+            stderr
+        };
+        Err(format!(
+            "Updated config, but failed to restart scrolltune.service: {detail}"
+        ))
     }
 }

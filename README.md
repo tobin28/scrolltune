@@ -1,29 +1,18 @@
 # scrolltune
 
-A lightweight evdev filter that tames high-resolution scroll wheels on Linux.
+A lightweight filter that tames high-resolution scroll wheels on Linux.
 
 ## Problem
 
-Mice with high-resolution scroll wheels (Logitech MX Master, MX Anywhere, etc.) feel jittery on Linux. Every hi-res scroll tick is passed straight through to applications, causing overly sensitive, twitchy scrolling. On Windows and macOS, scrolling typically feels closer to the wheel's physical detents because small ticks are accumulated before a full line-scroll step is emitted.
-
-Linux has no built-in mechanism for this — libinput forwards all hi-res events directly, leaving applications to deal with them individually. Most Linux applications don't implement accumulation, resulting in noticeably worse scroll behavior compared to the same mouse on Windows or macOS.
+Mice with high-resolution scroll wheels (Logitech MX Master, MX Anywhere, etc.) feel jittery on Linux. Every hi-res tick is forwarded directly to applications — unlike Windows and macOS, Linux has no built-in accumulation, so scrolling feels overly sensitive.
 
 ## How it works
 
-The filter grabs the mouse's evdev device, intercepts hi-res scroll events (`REL_WHEEL_HI_RES`), and accumulates them. A scroll event is only emitted when the accumulated value reaches a configurable threshold (default: 120 hi-res ticks = one physical notch/detent).
+The filter grabs the mouse's evdev device, intercepts hi-res scroll events (`REL_WHEEL_HI_RES`), and accumulates them. A scroll event is only emitted when the accumulated value reaches a configurable threshold (default: 120 hi-res ticks = one physical notch/detent). On direction change, the accumulator resets to zero for immediate responsiveness. All other events (mouse movement, clicks, horizontal scroll) pass through instantly — there is no buffering or added latency.
 
-- Hi-res scroll ticks are accumulated until the threshold is reached
-- When the threshold is crossed, quantized `REL_WHEEL` and `REL_WHEEL_HI_RES` events are emitted
-- On direction change, the accumulator resets to zero for immediate responsiveness
-- The original paired `REL_WHEEL` events from the kernel are suppressed
+The filter creates a virtual input device via uinput that applications see instead of the original. It uses standard kernel interfaces (evdev and uinput) and works on any modern Linux distribution.
 
-All other events (mouse movement, clicks, horizontal scroll) pass through with zero delay. There is no buffering or timer — each event is processed instantly, so there is no added input latency.
-
-The filter creates a virtual input device via uinput that applications see instead of the original.
-
-It uses standard Linux kernel interfaces (evdev and uinput) and should work on any modern Linux distribution with evdev and uinput support — there are no distro-specific or desktop-specific dependencies.
-
-`scrolltune` only supports mice that expose `REL_WHEEL_HI_RES`. If the selected device does not provide hi-res wheel events, the program exits with a clear error instead of grabbing it.
+`scrolltune` only supports mice that expose `REL_WHEEL_HI_RES`. If the selected device does not provide hi-res wheel events, the program exits with a clear error.
 
 ## Device detection
 
@@ -71,41 +60,45 @@ In most cases you can leave `device` empty — auto-detection will find the righ
 
 ```
 # Uses /etc/scrolltune.toml or defaults
-sudo scrolltune
+cargo run --release -- --help
+
+# Start the filter directly from the build tree
+sudo cargo run --release --
 ```
 
 This is the quickest way to test the filter without setting it up as a persistent system service.
 
+For quick inspection and configuration, `scrolltune` also provides a small CLI:
+
+```
+# Show available commands
+cargo run --release -- --help
+
+# Show service/config status
+cargo run --release -- --status
+
+# List mouse-like input devices
+cargo run --release -- --list-devices
+
+# Pick a device interactively
+sudo cargo run --release -- --set-device
+
+# Change threshold interactively or directly
+sudo cargo run --release -- --set-threshold
+sudo cargo run --release -- --set-threshold 60
+```
+
+Short aliases are available as well: `-h`, `-s`, `-l`, `-d`, and `-t`. Use `sudo` for commands that update `/etc/scrolltune.toml` or restart the systemd service. After installation, the same commands are available through the installed `scrolltune` binary in `/usr/local/bin`.
+
+When these commands update `/etc/scrolltune.toml`, `scrolltune.service` is restarted automatically so the change takes effect immediately.
+
 ## System installation
 
-If you want `scrolltune` to run automatically in the background, use the install script to build it, install the binary to `/usr/local/bin`, install the systemd service, seed `/etc/scrolltune.toml` if it does not already exist, and start it:
+To run `scrolltune` as a persistent background service, use the install script. It builds the binary, installs it to `/usr/local/bin`, sets up the systemd service and udev rule, seeds `/etc/scrolltune.toml` if missing, and starts the service:
 
 ```
 ./install.sh
+./install.sh --overwrite-config  # replace existing config with repo default
 ```
 
-To intentionally replace the existing config with the repo default:
-
-```
-./install.sh --overwrite-config
-```
-
-This installs the persistent systemd-based setup. The service runs as root (required for evdev grab and uinput access) and starts automatically on boot.
-
-The install script also installs a udev rule that restarts the service when a mouse-like USB input device is plugged in or removed, so the filter recovers automatically when the device topology changes. The service also remembers the last device it successfully grabbed. When possible, it uses that to disambiguate future restarts.
-
-## Managing the service
-
-```
-# Check status
-sudo systemctl status scrolltune
-
-# Restart after config change
-sudo systemctl restart scrolltune
-
-# Stop
-sudo systemctl stop scrolltune
-
-# Disable autostart
-sudo systemctl disable scrolltune
-```
+The service runs as root (required for evdev grab and uinput) and starts on boot. A udev rule restarts it when mouse-like input devices are added or removed (USB and Bluetooth), and it remembers the last device it grabbed to disambiguate future restarts.
