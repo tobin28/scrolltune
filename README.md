@@ -67,9 +67,18 @@ threshold = 120
 
 In most cases you can leave `device` empty — auto-detection will find the right supported mouse. Set it only if auto-detection picks the wrong device or can't decide.
 
-## Installation
+## Manual usage
 
-Run the install script to build, install the binary to `/usr/local/bin`, install the systemd service, seed `/etc/scrolltune.toml` if it does not already exist, and start it:
+```
+# Uses /etc/scrolltune.toml or defaults
+sudo scrolltune
+```
+
+This is the quickest way to test the filter without setting it up as a persistent system service.
+
+## System installation
+
+If you want `scrolltune` to run automatically in the background, use the install script to build it, install the binary to `/usr/local/bin`, install the systemd service, seed `/etc/scrolltune.toml` if it does not already exist, and start it:
 
 ```
 ./install.sh
@@ -81,16 +90,9 @@ To intentionally replace the existing config with the repo default:
 ./install.sh --overwrite-config
 ```
 
-The service runs as root (required for evdev grab and uinput access) and starts automatically on boot.
+This installs the persistent systemd-based setup. The service runs as root (required for evdev grab and uinput access) and starts automatically on boot.
 
 The install script also installs a udev rule that restarts the service when a mouse-like USB input device is plugged in or removed, so the filter recovers automatically when the device topology changes. The service also remembers the last device it successfully grabbed and uses that to disambiguate future restarts when possible.
-
-## Manual usage
-
-```
-# Uses /etc/scrolltune.toml or defaults
-sudo scrolltune
-```
 
 ## Managing the service
 
