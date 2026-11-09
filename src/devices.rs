@@ -340,7 +340,8 @@ fn is_virtual_device(path: &Path, dev: &Device) -> bool {
 
     let sysfs_device_path = Path::new("/sys/class/input").join(event_name).join("device");
     fs::canonicalize(sysfs_device_path)
-        .map(|resolved| resolved.starts_with("/sys/devices/virtual"))
+        // Bluetooth HID devices live under virtual/misc/uhid, unlike uinput mice.
+        .map(|resolved| resolved.starts_with("/sys/devices/virtual/input"))
         .unwrap_or(false)
 }
 

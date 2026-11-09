@@ -1,6 +1,6 @@
-# Restart scrolltune when a mouse-like USB input device appears or disappears.
+# Restart scrolltune when a mouse-like USB or Bluetooth device appears or disappears.
 # This ensures the service re-grabs the mouse after topology changes.
 # To limit to a specific device, add ATTRS{idVendor} and ATTRS{idProduct} filters.
-# Only trigger on real mouse-like USB devices, not virtual ones created by uinput
-ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", DEVPATH!="*virtual*", ENV{ID_INPUT_MOUSE}=="1", RUN+="/usr/bin/systemctl restart scrolltune.service"
-ACTION=="remove", SUBSYSTEM=="input", KERNEL=="event*", DEVPATH!="*virtual*", ENV{ID_INPUT_MOUSE}=="1", RUN+="/usr/bin/systemctl restart scrolltune.service"
+# Bluetooth uses virtual/misc/uhid; exclude only virtual/input devices from uinput.
+ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", DEVPATH!="*/virtual/input/*", ENV{ID_INPUT_MOUSE}=="1", RUN+="/usr/bin/systemctl restart scrolltune.service"
+ACTION=="remove", SUBSYSTEM=="input", KERNEL=="event*", DEVPATH!="*/virtual/input/*", ENV{ID_INPUT_MOUSE}=="1", RUN+="/usr/bin/systemctl restart scrolltune.service"
